@@ -1,0 +1,228 @@
+########## 2/10/2023 ##########
+
+# ---------------------------------------------------------------------------- #
+############### SCRIPT AUTOMATIZADO DE ANÁLISIS DE SUPERVIVENCIA ###############
+# ---------------------------------------------------------------------------- #
+
+## Created: 2/10/2023
+## Updated:
+
+## Este script lo voy a crear para automatizar los análisis de supervivencia, donde lo que yo le voy a pasar es un dataframe con los
+## datos preparados y las covariables de interés en caso de haberlas.
+
+## El análisis que voy a hacer inicialmente va a ser un modelo de Cox porque la variable que me interesa testar ahora es cuantitativa y
+## con ete modelo lo que voy a hacer es un  modelo de riesgo, más adelante, me gustaría actualizar el script para incluir una parte
+## para sacar las curvas de Kaplan-Meier.
+
+########## LIBRERÍAS ##########
+library(ggplot2)
+library(readxl)
+library(survival)
+library(survminer)
+library(ggsurvfit)
+library(janitor)
+library(openxlsx)
+library(broom)
+
+##############################
+
+# ---------------------------------------------------------------------------- #
+######################### INTRODUCCIÓN MANUAL DE DATOS ######################### 
+# ---------------------------------------------------------------------------- #
+
+#### SUVIVAL DATAFRAME ####
+  ## Pasar directamente el dataframe e introducir cuál es la columna de evento y cuál es la columna de tiempo
+  ## y luego indicar también cuál categoría es el evento y cuál el dato censurado.
+
+surv_df = lung
+time_col = colnames(lung)[2]
+event_col = colnames(lung)[3]
+event = 2
+censor = 1
+
+covariables = colnames(lung)[c(5,10)] ## Aquí introduciremos el nombre de la covariable de interés. 
+                                              ## SOLO SE ADMITE 1 COVARIABLE PARA LA TABLA DESCRIPTIVA
+
+#### MODEL CHOICE ####
+survival_model = 'Cox'                      ## KM/Cox
+variables_to_test = 'multivariable'         ## univariable/multivariable
+
+formula_multivariable = 'sex + wt.loss' ## Solo en caso de ser un análisis multivariante
+
+#### MISCELANEOUS ####
+title = 'Prueba 4 Cox Multivariante'
+time_units = 'days'
+# ---------------------------------------------------------------------------- #
+################################ AUTOMATIZACIÓN ################################ 
+# ---------------------------------------------------------------------------- #
+where_to_save = getwd()
+dir.create(paste(where_to_save,paste(title, Sys.Date(),sep=' '), sep='/'))
+setwd(paste(where_to_save,paste(title, Sys.Date(),sep=' '), sep='/'))
+
+wb = createWorkbook()
+
+########## 1) TABLAS DESCRIPTIVAS ##########
+if(length(covariables) != 0){
+  for(var in covariables){
+    report1 <- surv_df %>%
+      tabyl(.data[[var]], .data[[event_col]]) %>%
+      adorn_totals(where='both')%>%
+      adorn_percentages() %>%
+      adorn_pct_formatting()%>%
+      adorn_ns(position = 'front') 
+    
+    report2 = surv_df  %>%
+      group_by(.data[[event_col]], .data[[var]]) %>% dplyr::summarise('Mean time' = round(mean(.data[[time_col]]),digits = 2),
+                                                                       'Median time' = round(median(.data[[time_col]]),digits = 2))
+    
+    colnames(report2)[3] = paste('Mean time', paste0('(',time_units,')'), sep=' ')
+    colnames(report2)[4] = paste('Median time', paste0('(',time_units,')'), sep=' ')
+    
+    def_report = merge(report1, report2)
+    addWorksheet(wb, sheetName = var)
+    writeData(wb, sheet=var, def_report)
+  }
+ 
+}else {
+  report1 = surv_df %>%
+    tabyl(all_of(event_col), show_na = F)%>%
+    adorn_pct_formatting()%>%
+    adorn_totals(where =c("col")) 
+  
+  report2 <- surv_df %>%
+    group_by(.data[[event_col]]) %>% dplyr::summarise('Mean time' = round(mean(.data[[time_col]]),digits = 2),
+                                           'Median time' = round(median(.data[[time_col]]),digits = 2))  
+  colnames(report2)[2] = paste('Mean time', paste0('(',time_units,')'), sep=' ')
+  colnames(report2)[3] = paste('Median time', paste0('(',time_units,')'), sep=' ')
+  
+  def_report = merge(report1, report2)
+  addWorksheet(wb, sheetName = 'Report')
+  writeData(wb, 'Report', def_report)
+}
+
+
+########## 2) ANÁLISIS DE SUPERVIVENCIA  ##########
+surv_df$event = ifelse(surv_df[[event_col]] == event, 1, 0)
+surv_df$time = surv_df[[time_col]]
+
+if(survival_model == 'KM'){
+  ## 2.1) Modelo de Kaplan-Meier Univariante
+  surv_df[,covariables] = apply(surv_df[,covariables], 2, factor)
+  for(variable in covariables){
+    formula <- as.formula(paste('Surv(time = surv_df$time,
+                    event = surv_df$event) ~', paste(variable)))
+    surv_object = Surv(time = surv_df$time,
+                       event = surv_df$event)
+    
+    surv_model <- survival::survfit(formula, data = surv_df)
+    surv_model$call$formula <- formula
+    
+    ## Summary Report
+    surv_KM_report <- summary(surv_model)
+    cols <- lapply(c(2:6, 8:11) , function(x) surv_KM_report[x])
+    surv_KM_report <- do.call(data.frame, cols)
+
+    addWorksheet(wb, sheetName = paste0('Surv Report ', variable))
+    writeData(wb, paste0('Surv Report ', variable), surv_KM_report)
+    
+    ## KM Curves
+    png(filename = paste0(paste('Survival Plot', variable, title, Sys.Date(), sep = ' '), '.png'), res = 300, width = 3000, height = 3000)
+    print(survminer::ggsurvplot(
+      surv_model,
+      data = surv_df,
+      conf.int = F,
+      surv.scale = 'percent',
+      break.time.by = 10,
+      xlab = paste(time_col, paste0('(', time_units,')'), sep=' '),
+      ylab = paste(event_col, 'Probability', sep=' '),
+      pval = T,
+      risk.table = T,
+      legend.title = variable,
+      legend.labs = levels(surv_df[[variable]]),
+      font.legend = 10,
+      palette = 'Dark2',
+      surv.median.line = 'hv', 
+      ggtheme = theme_light(),
+      title = paste('KM Curve', variable, sep=' ')
+    ))
+    
+    dev.off()
+    
+  }
+ 
+}else{
+  ## 2.2) Cox Proportioinal Hazard Model Univariable
+  if(variables_to_test == 'univariable'){
+    univ_formulas <- sapply(covariables,
+                            function(x) as.formula(paste('Surv(time, status)~', x)))
+    univ_models <- lapply(univ_formulas, function(x){coxph(x, data = lung)})
+    ## Summary Report
+    for(model in names(univ_models)){
+      univ_cox.summary = as.data.frame(summary(univ_models[[model]])$coefficients)
+      univ_cox.summary$significance = ifelse(univ_cox.summary$`Pr(>|z|)` < 0.001, '***',
+                                ifelse(univ_cox.summary$`Pr(>|z|)` <= 0.01, '**',
+                                       ifelse(univ_cox.summary$`Pr(>|z|)` <= 0.05, '*',
+                                              ifelse(univ_cox.summary$`Pr(>|z|)` <= 0.1, '·', 'NS'))))
+      univ_cox.summary$interpretation = ifelse(univ_cox.summary$`Pr(>|z|)` >= 0.05, 'NS',
+                                               ifelse(univ_cox.summary$`exp(coef)` > 1, 'The predictor has a protective effect',
+                                                      ifelse(univ_cox.summary$`exp(coef)` < 1, 'The predictor is associated with grater risk', 'Does not affect survival')))
+      univ_cox.summary = univ_cox.summary %>% tibble::rownames_to_column(var = 'Variable')
+      addWorksheet(wb, sheetName = paste('Cox PH Report', model))
+      writeData(wb, paste('Cox PH Report', model), univ_cox.summary)
+    }
+    
+  ## Forest Plot Univariate    
+    for(variables in covariables){
+      png(filename= paste0('HR plot ', variables, ' ', title, '.png'), res = 300, height = 3000, width = 3000)
+      print(ggforest(univ_models[[variables]], data = surv_df))
+      graphics.off()
+    }
+  }
+    
+    ## PENDIENTE DE INTRODUCIR EL TEST PARA COMPROBAR LA ASUNCIÓN DE RIESGOS PROPORCIONALES. LO DEJO TAPADO
+    #test_ph = as.data.frame((survival::cox.zph(cox_model))$table) ## Si el p-valor es < 0.05, el modelo y/o la variable no cumple la asunción de riesgos proporcionales
+    #test_ph$interpretation = ifelse(test_ph$p < 0.05, 'The model or feature does not meet the PH assumption', 'The model or feature meet the PH assumption')
+    #
+    #png(filename=paste0('Proportional hazard assumption ', title, '.png'), res = 300, height = 3000, width = 3000)
+    #survminer::ggcoxzph(survival::cox.zph(cox_model))
+    #dev.off()} 
+  
+  else {
+    ## 2.2) Cox Proportional Hazard Model Multivariate
+    cosph.multi.form = as.formula(paste('Surv(time = surv_df$time, event = surv_df$event)', '~', formula_multivariable))
+    multi.cox = coxph(cosph.multi.form, data = surv_df)
+    
+    test_ph = as.data.frame((survival::cox.zph(multi.cox))$table)
+    test_ph$Interpretation = ifelse(test_ph$p < 0.05, 'The model or feature does not meet the PH assumption', 'The model or feature meet the PH assumption')
+    test_ph = test_ph %>% tibble::rownames_to_column('term')
+    
+    addWorksheet(wb, sheetName = 'Mult Cox Assumption')
+    writeData(wb, sheet = 'Mult Cox Assumption', test_ph)
+    ## Summary Report
+    res.multi = as.data.frame(summary(multi.cox)$coefficients)
+    res.multi$significance = ifelse(res.multi$`Pr(>|z|)` < 0.001, '***',
+                              ifelse(res.multi$`Pr(>|z|)` <= 0.01, '**',
+                                     ifelse(res.multi$`Pr(>|z|)` <= 0.05, '*',
+                                            ifelse(res.multi$`Pr(>|z|)` <= 0.1, '·', 'NS'))))
+    res.multi$interpretation = ifelse(res.multi$`Pr(>|z|)` >= 0.05, 'NS',
+                                             ifelse(res.multi$`exp(coef)` > 1, 'The predictor has a protective effect',
+                                                    ifelse(res.multi$`exp(coef)` < 1, 'The predictor is associated with grater risk', 'Does not affect survival')))
+    
+    
+    addWorksheet(wb, sheetName = 'Mult Cox Report')
+    writeData(wb, sheet = 'Mult Cox Report', res.multi)
+    
+    
+    ## Forest Plot Multivariate
+    png(filename= paste0('HR plot Cox Multivariate', title, '.png'), res = 300, height = 3000, width = 3000)
+    print(ggforest(multi.cox, data = surv_df, main = title))
+    graphics.off()
+    
+  }
+  }
+
+saveWorkbook(wb, file =paste0(paste('Survival Analysis', title, Sys.Date(), sep=' '),'.xlsx'))
+setwd(where_to_save)
+# ---------------------------------------------------------------------------- #
+##################################### END ######################################
+# ---------------------------------------------------------------------------- #
